@@ -1,0 +1,548 @@
+---
+title: "Project_Code"
+output: html_document
+---
+
+#Code used in STAT-E109 Project
+
+#Data cleaning
+
+```{r setup, include=FALSE}
+library(stringr)
+library(tidyverse)
+library(psych)
+library(MASS)
+library(cowplot)
+library(car) #VIF function
+
+#trees
+library(mlbench)
+library(caret)
+library(e1071)
+library(lime)
+library(randomForest)
+
+
+ratings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-01-25/ratings.csv')
+details <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-01-25/details.csv')
+
+ratings <- as.data.frame(ratings)
+details <- as.data.frame(details)
+
+#merge the data
+games <- merge(ratings, details, by = "id")
+
+all_categories <- paste(games$boardgamecategory, collapse = ",")
+all_categories <- gsub("-","_",all_categories)
+all_categories <- gsub("\\[","",all_categories)
+all_categories <- gsub("\\]","",all_categories)
+all_categories <- gsub(", ",",",all_categories)
+all_categories <- gsub("NA,","",all_categories)
+
+#84 categories
+all_categories <- as.vector(unlist(str_split(all_categories,",")))
+
+sorted_categories <- sort(table(all_categories), decreasing = TRUE)
+
+unique_categories <- unique(all_categories)
+
+for(i in 1:length(unique_categories)){
+  colname <- tolower(str_remove_all(unique_categories[i],"\"|\'|/ |/|& "))
+  colname <- gsub(" ","_",colname)
+  colname <- paste0("category_",colname)
+  games[,colname] <- ifelse(grepl(unique_categories[i],games$boardgamecategory),1,0)
+}
+
+categoryvars <- names(games)[grepl("category_",names(games))]
+
+
+#rename
+games <- games %>% 
+  dplyr::rename(rating = average)
+
+#remove games with unknown publication year
+games <- subset(games, yearpublished != 0)
+games <- subset(games, yearpublished >= 1958)
+
+#if max players is 0, set to same as min players, then remove games that are still 0 
+games$maxplayers <- ifelse(games$maxplayers == 0, games$minplayers, games$maxplayers)
+games <- subset(games, maxplayers != 0)
+games <- subset(games, minplayers != 0)
+
+#remove games with no play time data (0 minutes)
+
+games <- subset(games, minplaytime != 0)
+games <- subset(games, maxplaytime != 0)
+
+
+```
+
+### Checking for normally distributed variables
+
+```{r echo=FALSE}
+
+#Figure 1 - histogram of each numeric variable
+g1 <- ggplot(games, aes(x = rating)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Rating")
+
+g2 <- ggplot(games, aes(x = yearpublished)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Year Published")
+
+g3 <- ggplot(games, aes(x = minplayers)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Minplayers")
+
+g4 <- ggplot(games, aes(x = maxplayers)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Maxplayers")
+
+
+g5 <- ggplot(games, aes(x = minplaytime)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Minplaytime")
+
+g6 <- ggplot(games, aes(x = maxplaytime)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Maxplaytime")
+
+g7 <- ggplot(games, aes(x = minage)) + 
+  geom_histogram(binwidth = 2) + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Minage")
+
+g <- plot_grid(g1, g2, g3, g4, g5, g6, g7, ncol = 2)
+g
+
+#Appendix figure A1 - Q-Q plots
+par(mfrow=c(1,2))
+
+qqnorm(games$rating, main = "Normal Q-Q Plot for Rating")
+qqline(games$rating)
+
+qqnorm(games$yearpublished, main = "Normal Q-Q Plot for Year Published")
+qqline(games$yearpublished)
+
+qqnorm(games$minplayers, main = "Normal Q-Q Plot for Minplayers")
+qqline(games$minplayers)
+
+qqnorm(games$maxplayers, main = "Normal Q-Q Plot for Maxplayers")
+qqline(games$maxplayers)
+
+qqnorm(games$minplaytime, main = "Normal Q-Q Plot for Minplaytime")
+qqline(games$minplaytime)
+
+qqnorm(games$maxplaytime, main = "Normal Q-Q Plot for Maxplaytime")
+qqline(games$maxplaytime)
+
+qqnorm(games$minage, main = "Normal Q-Q Plot for Minage")
+qqline(games$minage)
+
+
+#transformations
+games$yearpublished_transform <- sqrt(max(games$yearpublished) - games$yearpublished)
+games$log_minplayers <- log(games$minplayers)
+games$log_maxplayers <- log(games$maxplayers)
+games$log_minplaytime <- log(games$minplaytime)
+games$log_maxplaytime <- log(games$maxplaytime)
+
+#new histograms after transformations
+par(mfrow=c(1,1))
+
+g2 <- ggplot(games, aes(x = yearpublished_transform)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of Year Published (Transformed)")
+
+g3 <- ggplot(games, aes(x = log_minplayers)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of log(minplayers)")
+
+g4 <- ggplot(games, aes(x = log_maxplayers)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of log(maxplayers)")
+
+
+g5 <- ggplot(games, aes(x = log_minplaytime)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of log(minplaytime)")
+
+g6 <- ggplot(games, aes(x = log_maxplaytime)) + 
+  geom_histogram() + 
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Frequency") + 
+  ggtitle("Histogram of log(maxplaytime)")
+
+g <- plot_grid(g2, g3, g4, g5, g6, ncol = 2)
+g
+
+#new q-q plots after transformations
+
+#Appendix figure A2 - Q-Q plots
+par(mfrow=c(1,2))
+
+
+qqnorm(games$yearpublished_transform, main = "Normal Q-Q Plot for Year Published (Transformed)")
+qqline(games$yearpublished_transform)
+
+qqnorm(games$log_minplayers, main = "Normal Q-Q Plot for log(minplayers)")
+qqline(games$log_minplayers)
+
+qqnorm(games$log_maxplayers, main = "Normal Q-Q Plot for log(maxplayers")
+qqline(games$log_maxplayers)
+
+qqnorm(games$log_minplaytime, main = "Normal Q-Q Plot for log(minplaytime")
+qqline(games$log_minplaytime)
+
+qqnorm(games$log_maxplaytime, main = "Normal Q-Q Plot for log(maxplaytime")
+qqline(games$log_maxplaytime)
+
+```
+
+### Checking for correlations between variables
+
+```{r, eval = TRUE}
+
+games_transform <- games[,c("rating","yearpublished_transform","log_minplayers","log_maxplayers","log_minplaytime","log_maxplaytime","minage")]
+
+pairs.panels(games_transform, method = "pearson")
+
+```
+
+### Rating by category
+
+```{r, eval = TRUE}
+
+for(i in 1:length(categoryvars)) {
+  sub <- games[which(games[,categoryvars[i]]==1),]
+  sub$group <- categoryvars[i]
+  if(i == 1){
+    plotdata <- sub
+  } else {
+    plotdata <- rbind(sub, plotdata)
+  }
+}
+
+#number of games per category
+
+games_per_category <- plotdata %>% 
+  group_by(group) %>% 
+  summarise(count = n(),
+            mean_rating = mean(rating))
+
+ggplot(games_per_category, aes(x=reorder(group, count), y=count)) + 
+  geom_col() + 
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) + 
+  labs(x = "Category", y = "Number of Games") + 
+  ggtitle("Number of Games by Category")
+
+# Plot
+library(ggplot2)
+ggplot(plotdata, aes(x=reorder(group, rating), y=rating)) + 
+  geom_boxplot(show.legend = FALSE) + 
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) + 
+  labs(x = "Category", y = "Average User Rating") + 
+  ggtitle("Boxplot of Game Ratings by Category")
+
+```
+
+
+# Linear Models
+
+```{r, eval = TRUE}
+games_fit <- games[,c("rating","yearpublished_transform","log_minplayers","log_maxplayers","log_maxplaytime","minage",categoryvars)]
+
+set.seed(1234)
+ind <- sample(2, nrow(games_fit), replace = T, prob = c(0.8, 0.2))
+
+train <- games_fit[ind == 1,]
+test <- games_fit[ind == 2,]
+
+m <- lm(rating ~ ., train)
+
+#model <- stepAIC(m, direction = "both", trace = F)
+#summary(model)
+
+m <- lm(rating ~ . - category_card_game - category_mythology - category_nautical - category_collectible_components - category_american_west - category_memory - category_animals - category_pirates - category_action_dexterity - category_zombies - category_environmental - category_vietnam_war - category_american_indian_wars, train)
+
+#model <- stepAIC(m, direction = "both", trace = F)
+
+#saveRDS(model, "model_AIC.RDS")
+
+model <- readRDS("model_AIC.RDS")
+
+summary(model)
+sort(vif(model))
+
+#diagnostic plots
+par(mfrow=c(1,2))
+plot(model)
+
+#Figure 6 - plot of coefficients from the model
+
+coef <- as.data.frame(model$coefficients)
+coef$abs_coef <- abs(coef$`model$coefficients`)
+coef$variable <- row.names(coef)
+
+g <- ggplot(coef, aes(x = reorder(variable, abs_coef), y = `model$coefficients`)) + 
+  geom_col() + 
+  coord_flip() + 
+  theme_minimal() + 
+  labs(x = "Variable", y = "Coefficient Value")
+
+g
+
+#predictions from training data
+pred_train <- predict(model, train)
+
+train$rating_predicted <- pred_train
+
+par(mfrow=c(1,1))
+
+cor(pred_train, train$rating)^2
+
+g1 <- ggplot(train, aes(x = rating, y = rating_predicted)) + 
+  geom_point(alpha = 0.5) + 
+  annotate("text", x = 2.5, y = 8.5,
+  label = "paste(italic(R) ^ 2, \" = .42\")", parse = TRUE) +
+  theme_minimal() + 
+  labs(y = "Predicted Rating", x = "Actual Rating") +
+  ggtitle("Scatterplot of Predicted vs Actual Ratings\n for Training Data")
+g1
+
+#predictions from testing data
+pred_test <- predict(model, test)
+
+test$rating_predicted <- pred_test
+
+#plot(pred_test ~ test$rating)
+cor(pred_test, test$rating)^2
+
+g2 <- ggplot(train, aes(x = rating, y = rating_predicted)) + 
+  geom_point(alpha = 0.5) + 
+  annotate("text", x = 2.5, y = 8.5,
+  label = "paste(italic(R) ^ 2, \" = .42\")", parse = TRUE) +
+  theme_minimal() + 
+  labs(y = "Predicted Rating", x = "Actual Rating") +
+  ggtitle("Scatterplot of Predicted vs Actual Ratings\n for Test Data")
+g2
+
+g <- plot_grid(g1, g2, ncol = 2)
+
+```
+
+### Model with interaction terms
+
+```{r}
+
+numericvars <- c("yearpublished_transform","log_minplayers","log_maxplayers","log_maxplaytime","minage")
+
+model1_coef <- as.data.frame(summary(model)$coefficients)
+
+
+categoryvars_keep <- categoryvars[(categoryvars %in% row.names(model1_coef))]
+
+interaction_formula <- formula(paste0("rating ~ (",paste(categoryvars_keep, collapse = " + "),") * (",paste(numericvars, collapse = " + "),")"))
+
+m2 <- lm(interaction_formula, train)
+
+#takes too long to run
+#model2 <- stepAIC(m2, direction = "both", trace = F)
+
+coef <- as.data.frame(summary(m2)$coefficients)
+sig_coef <- subset(coef, `Pr(>|t|)` < 0.05)
+
+newvars <- row.names(sig_coef)[!row.names(sig_coef) %in% c("(Intercept)","category_dice","category_negotiation:yearpublished_transform","category_aviation_flight:log_minplayers","category_movies_tv_radio_theme:minage","category_trivia:log_minplayers","category_american_civil_war:minage","category_childrens_game:log_maxplayers","category_video_game_theme:yearpublished_transform","category_video_game_theme:log_maxplayers","category_negotiation:log_minplayers","category_political:log_maxplaytime","category_fantasy:log_maxplayers","category_dice:yearpublished_transform","category_miniatures:log_minplayers","category_electronic:log_minplayers",
+#high vif values
+"category_miniatures:log_maxplaytime","category_miniatures:log_minplaytime","category_trains","category_trivia:log_maxplaytime","category_civilization","category_trains:log_maxplaytime","category_trains:log_maxplaytime","category_negotiation","category_party_game:log_maxplaytime","category_civilization:minage","category_industry_manufacturing:log_maxplaytime","category_childrens_game:log_maxplaytime")]
+
+
+new_interaction_formula <- formula(paste0("rating ~ ",paste(newvars, collapse = " + ")))
+
+model2 <- lm(new_interaction_formula, train)
+summary(model2)
+sort(vif(model2))
+
+saveRDS(model2, "model2_interactions.RDS")
+
+coef <- as.data.frame(model2$coefficients)
+coef$abs_coef <- abs(coef$`model2$coefficients`)
+coef$variable <- row.names(coef)
+
+#Figure 6 - plot of coefficients from the model
+
+g <- ggplot(coef, aes(x = reorder(variable, abs_coef), y = `model2$coefficients`)) + 
+  geom_col() + 
+  coord_flip() + 
+  theme_minimal() + 
+  labs(x = "Variable", y = "Coefficient Value") + 
+  ggtitle("Coefficient Values for Model 2 (With Interactions)")
+
+g
+
+#predictions from training data
+pred_train <- predict(model2, train)
+
+train$rating_predicted_interactions <- pred_train
+
+par(mfrow=c(1,1))
+
+cor(pred_train, train$rating)^2
+
+g1 <- ggplot(train, aes(x = rating, y = rating_predicted_interactions)) + 
+  geom_point(alpha = 0.5) + 
+  annotate("text", x = 2.5, y = 8.5,
+  label = "paste(italic(R) ^ 2, \" = .43\")", parse = TRUE) +
+  theme_minimal() + 
+  labs(y = "Predicted Rating", x = "Actual Rating") +
+  ggtitle("Scatterplot of Predicted vs Actual Ratings\n for Training Data (Model 2)")
+g1
+
+#predictions from testing data
+pred_test <- predict(model2, test)
+
+test$rating_predicted_interactions <- pred_test
+
+#plot(pred_test ~ test$rating)
+cor(pred_test, test$rating)^2
+
+g2 <- ggplot(train, aes(x = rating, y = rating_predicted_interactions)) + 
+  geom_point(alpha = 0.5) + 
+  annotate("text", x = 2.5, y = 8.5,
+  label = "paste(italic(R) ^ 2, \" = .42\")", parse = TRUE) +
+  theme_minimal() + 
+  labs(y = "Predicted Rating", x = "Actual Rating") +
+  ggtitle("Scatterplot of Predicted vs Actual Ratings\n for Test Data (Model 2)")
+g2
+
+g <- plot_grid(g1, g2, ncol = 2)
+g
+
+```
+
+
+### Regression trees
+
+```{r}
+games_fit_bag <- games[,c("rating","yearpublished","minplayers","maxplayers","minplaytime","maxplaytime","minage",categoryvars)]
+
+set.seed(1234)
+ind <- sample(2, nrow(games_fit_bag), replace = T, prob = c(0.8, 0.2))
+
+train <- games_fit_bag[ind == 1,]
+test <- games_fit_bag[ind == 2,]
+
+
+bagging
+set.seed(1234)
+cvcontrol <- trainControl(method="repeatedcv",
+                          number = 5,
+                          repeats = 2,
+                          allowParallel=TRUE)
+set.seed(1234)
+bag <- train(rating ~ .,
+             data=train,
+             method="treebag",
+             trControl=cvcontrol,
+             importance=TRUE)
+
+saveRDS(bag, "bag.RDS")
+
+bag <- readRDS("bag.RDS")
+
+plot(varImp(bag), main = "Variable Importance Plot for Model 3 (Bagging)")
+
+# Plot, RMSE, R-square
+
+bag_train <- predict(bag,  train)
+train$rating_predicted_bag <- bag_train
+#plot(bag_train ~ train$rating, main = 'Predicted Vs Actual Rating - Training data (Model 3)')
+
+g1 <- ggplot(train, aes(x = rating, y = rating_predicted_bag)) + 
+  geom_point(alpha = 0.5) + 
+  annotate("text", x = 2.5, y = 8.5,
+  label = "paste(italic(R) ^ 2, \" = .35\")", parse = TRUE) +
+  theme_minimal() + 
+  labs(y = "Predicted Rating", x = "Actual Rating") +
+  ggtitle("Scatterplot of Predicted vs Actual Ratings\n for Training Data (Model 3)")
+
+
+sqrt(mean((train$rating - bag_train)^2))
+cor(train$rating, bag_train) ^2
+
+bag_test <- predict(bag,  test)
+plot(bag_test ~ test$rating, main = 'Predicted Vs Actual Rating - Test data')
+
+sqrt(mean((test$rating - bag_test)^2))
+cor(test$rating, bag_test) ^2
+
+
+# Boosting
+set.seed(1234)
+boost <- train(rating ~ ., 
+             data=train,
+             method="xgbTree", 
+             trControl=cvcontrol,
+             tuneGrid = expand.grid(nrounds = 500,
+                                    max_depth = 3,
+                                    eta = 0.2,
+                                    gamma = 2.1,
+                                    colsample_bytree = 1,
+                                    min_child_weight = 1,
+                                    subsample = 1))
+saveRDS(boost, "boost.RDS")
+
+boost <- readRDS("boost.RDS")
+
+plot(varImp(boost), main = "Variable Importance Plot for Model 4 (Boosting)")
+
+boost_train <- predict(boost,  train)
+plot(boost_train ~ train$rating, main = 'Predicted Vs Actual Rating - Training data')
+
+sqrt(mean((train$rating - boost_train)^2))
+cor(train$rating, boost_train) ^2
+
+boost_test <- predict(boost,  test)
+plot(boost_test ~ test$rating, main = 'Predicted Vs Actual Rating - Test data')
+
+sqrt(mean((test$rating - boost_test)^2))
+cor(test$rating, boost_test) ^2
+```
+
